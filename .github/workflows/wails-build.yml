@@ -50,7 +50,7 @@ jobs:
 
       - name: Build Application
         run: |
-          export PATH=$PATH:$(go env GOPATH)/bin
+          export PATH="${PATH}:$(go env GOPATH)/bin"
           # Use system pkg-config on Linux
           if [ "${{ matrix.build.name }}" == "Linux" ]; then export PKG_CONFIG=/usr/bin/pkg-config; fi
           wails build ${{ matrix.build.flags }}
