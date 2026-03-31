@@ -13,8 +13,6 @@ import (
 type SerialService struct {
 	ctx           context.Context
 	port          serial.Port
-	portName      string
-	baudRate      int
 	isEmitting    bool
 	mu            sync.Mutex
 	stopChan      chan struct{}
@@ -31,11 +29,7 @@ func (s *SerialService) Startup(ctx context.Context) {
 }
 
 func (s *SerialService) GetPorts() ([]string, error) {
-	ports, err := serial.GetPortsList()
-	if err != nil {
-		return nil, err
-	}
-	return ports, nil
+	return serial.GetPortsList()
 }
 
 func (s *SerialService) StartEmission(portName string, baudRate int, sentences []string, frequency float64) error {
@@ -46,17 +40,13 @@ func (s *SerialService) StartEmission(portName string, baudRate int, sentences [
 		return fmt.Errorf("already emitting")
 	}
 
-	mode := &serial.Mode{
-		BaudRate: baudRate,
-	}
+	mode := &serial.Mode{BaudRate: baudRate}
 	port, err := serial.Open(portName, mode)
 	if err != nil {
-		return fmt.Errorf("failed to open port %s: %w", portName, err)
+		return err
 	}
 
 	s.port = port
-	s.portName = portName
-	s.baudRate = baudRate
 	s.isEmitting = true
 	s.stopChan = make(chan struct{})
 
@@ -85,43 +75,54 @@ func (s *SerialService) emissionLoop(sentences []string, frequency float64) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Mock data for NMEA
-	lat := 40.4168
-	lon := -3.7038
-	speed := 0.0
-	course := 0.0
+	// Initial Mock State
+	lat, lon := 40.4168, -3.7038
+	speed, course := 12.5, 225.0
+	depth := 25.0
+	windSpeed, windAngle := 15.0, 45.0
+	waterTemp := 18.5
+	xte := 0.02
 
 	for {
 		select {
 		case <-s.stopChan:
 			return
 		case <-ticker.C:
-			// Update mock data slightly to simulate movement
+			// Simulate movement and variations
 			lat += 0.0001
 			lon += 0.0001
-			speed = 15.5
-			course = 45.0
+			depth += (float64(time.Now().UnixNano()%10) - 5) * 0.1
+			if depth < 2.0 { depth = 2.0 }
+			windAngle += (float64(time.Now().UnixNano()%10) - 5) * 0.5
+			xte += (float64(time.Now().UnixNano()%10) - 5) * 0.001
 
 			for _, stype := range sentences {
-				var sentence string
+				var toSend []string
+
 				switch stype {
-				case "GGA":
-					sentence = FormatGPGGA(lat, lon, 1, 8, 1.0, 600.0)
-				case "RMC":
-					sentence = FormatGPRMC(lat, lon, speed, course)
-				case "VTG":
-					sentence = FormatGPVTG(course, speed)
-				default:
-					continue
+				case "GGA": toSend = append(toSend, FormatGPGGA(lat, lon))
+				case "RMC": toSend = append(toSend, FormatGPRMC(lat, lon, speed, course))
+				case "GLL": toSend = append(toSend, FormatGPGLL(lat, lon))
+				case "GSA": toSend = append(toSend, FormatGPGSA())
+				case "GSV": toSend = append(toSend, FormatGPGSV()...)
+				case "MWV": toSend = append(toSend, FormatIIMWV(windAngle, windSpeed))
+				case "DBT": toSend = append(toSend, FormatIIDBT(depth))
+				case "DPT": toSend = append(toSend, FormatIIDPT(depth))
+				case "VHW": toSend = append(toSend, FormatIIVHW(course, speed))
+				case "HDM": toSend = append(toSend, FormatIIHDM(course))
+				case "HDT": toSend = append(toSend, FormatIIHDT(course))
+				case "MTW": toSend = append(toSend, FormatIIMTW(waterTemp))
+				case "APB": toSend = append(toSend, FormatGPAPB(xte))
+				case "BWC": toSend = append(toSend, FormatGPBWC(lat, lon))
+				case "BOD": toSend = append(toSend, FormatGPBOD())
+				case "XTE": toSend = append(toSend, FormatGPXTE(xte))
+				case "AIS": toSend = append(toSend, FormatAIVDM())
 				}
 
-				_, err := s.port.Write([]byte(sentence + "\r\n"))
-				if err != nil {
-					runtime.EventsEmit(s.ctx, "log", "Error writing to port: "+err.Error())
-					s.StopEmission()
-					return
+				for _, sentence := range toSend {
+					s.port.Write([]byte(sentence + "\r\n"))
+					runtime.EventsEmit(s.ctx, "nmea-sentence", sentence)
 				}
-				runtime.EventsEmit(s.ctx, "nmea-sentence", sentence)
 			}
 		}
 	}
